@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import random
+import time
 import aiosqlite
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import (
@@ -18,72 +19,12 @@ from telegram.constants import ParseMode
 # ---------- Настройки ----------
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 DB_PATH = os.path.join(os.environ.get("DATA_DIR", "./data"), "mafia_bot.db")
+COOLDOWN_SECONDS = 2  # кулдаун между ходами
 
-ROWS = 7
-COLS = 2
-TOTAL_CELLS = ROWS * COLS  # 14 ячеек
-
-# ===== РОЛИ =====
-ROLES = [
-    # МИРНЫЕ (7 ролей)
-    {"name": "Мирный житель", "emoji": "👤", "side": "civilian", "role_type": "citizen",
-     "desc": "Простой житель Нью-Йорка. Твоя задача — вычислить мафию.",
-     "powers": "Голосуешь днём. Никаких особых способностей."},
-    
-    {"name": "Мирный житель", "emoji": "👤", "side": "civilian", "role_type": "citizen",
-     "desc": "Простой житель Нью-Йорка. Твоя задача — вычислить мафию.",
-     "powers": "Голосуешь днём. Никаких особых способностей."},
-    
-    {"name": "Бомж", "emoji": "🏚️", "side": "neutral", "role_type": "bum",
-     "desc": "Бездомный с улиц Адской Кухни. Ты видел всё, но тебе никто не верит.",
-     "powers": "Голосуешь днём. Доктор не может тебя лечить. Комиссар видит тебя как нейтрала."},
-    
-    {"name": "Капитан Америка", "emoji": "🦸", "side": "civilian", "role_type": "sergeant",
-     "desc": "Сержант армии и лидер Мстителей. Твой голос имеет больший вес.",
-     "powers": "На дневном голосовании твой голос считается за ДВА."},
-    
-    {"name": "Сорвиголова", "emoji": "⚖️", "side": "civilian", "role_type": "lawyer",
-     "desc": "Адвокат днём, защитник ночью. Можешь спасти невиновного.",
-     "powers": "Ночью выбери игрока — если его казнят днём, он выживет."},
-    
-    {"name": "Ник Фьюри", "emoji": "🕵️", "side": "civilian", "role_type": "commissioner",
-     "desc": "Глава Щ.И.Т. и комиссар полиции. Знаешь всё про всех.",
-     "powers": "Ночью проверяешь игрока и узнаёшь: МИРНЫЙ, МАФИЯ или НЕЙТРАЛ."},
-    
-    {"name": "Доктор Стрэндж", "emoji": "💉", "side": "civilian", "role_type": "doctor",
-     "desc": "Верховный маг Земли и главный врач. Можешь исцелить раненого.",
-     "powers": "Ночью выбери игрока — мафия не сможет его убить. Бомжа лечить нельзя."},
-    
-    {"name": "Булзай", "emoji": "🎯", "side": "civilian", "role_type": "sniper",
-     "desc": "Снайпер-ас. Один выстрел — одна смерть.",
-     "powers": "ОДИН раз за игру можешь выстрелить в любого игрока и убить его."},
-    
-    # МАФИЯ (2 роли)
-    {"name": "Кингпин", "emoji": "👑", "side": "mafia", "role_type": "don",
-     "desc": "Криминальный босс Нью-Йорка. Дон мафии.",
-     "powers": "Ночью ведёшь обсуждение с мафией. Твой голос — РЕШАЮЩИЙ."},
-    
-    {"name": "Чёрная Вдова", "emoji": "🕷️", "side": "mafia", "role_type": "mistress",
-     "desc": "Любовница и шпионка. Можешь отвлечь любого.",
-     "powers": "Ночью выбери игрока — он проведёт ночь с тобой и не выполнит свою роль."},
-    
-    # НЕЙТРАЛЫ (5 ролей)
-    {"name": "Дэдпул", "emoji": "🃏", "side": "neutral", "role_type": "suicide",
-     "desc": "Самоубийца с языком без костей. Твоя смерть — часть плана.",
-     "powers": "Если тебя убьют днём или ночью — забираешь с собой одного убийцу."},
-    
-    {"name": "Домино", "emoji": "🍀", "side": "neutral", "role_type": "lucky",
-     "desc": "Счастливчик. Удача всегда на твоей стороне.",
-     "powers": "Первый раз, когда тебя попытаются убить — ты выживаешь."},
-    
-    {"name": "Клетус Кесседи", "emoji": "🩸", "side": "neutral", "role_type": "maniac",
-     "desc": "Маньяк-убийца. Ты живёшь ради хаоса.",
-     "powers": "Каждую ночь можешь убить одного игрока. Твоя цель — остаться последним."},
-    
-    {"name": "Зелёный Гоблин", "emoji": "🎃", "side": "neutral", "role_type": "kamikaze",
-     "desc": "Камикадзе на глайдере. Взорвать всё — твой план.",
-     "powers": "Один раз за игру можешь взорвать себя и одного игрока (умираете оба)."},
-]
+# Максимальные размеры сетки
+MAX_ROWS = 7
+MAX_COLS = 4
+MAX_CELLS = MAX_ROWS * MAX_COLS  # 28
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -109,10 +50,13 @@ async def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 chat_id TEXT NOT NULL DEFAULT '',
                 message_id INTEGER,
+                rows INTEGER NOT NULL DEFAULT 7,
+                cols INTEGER NOT NULL DEFAULT 2,
                 roles TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'pending',
                 created_by INTEGER NOT NULL,
                 rewards TEXT NOT NULL DEFAULT '[]',
+                last_move_at REAL DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS game_moves (
@@ -133,23 +77,71 @@ async def init_db():
             CREATE UNIQUE INDEX IF NOT EXISTS idx_one_move_per_cell 
                 ON game_moves(game_id, cell_index);
         """)
+        # Миграции
+        for col in ["role_type", "rows", "cols", "rewards", "last_move_at"]:
+            try:
+                if col == "rows":
+                    await db.execute("ALTER TABLE games ADD COLUMN rows INTEGER NOT NULL DEFAULT 7")
+                elif col == "cols":
+                    await db.execute("ALTER TABLE games ADD COLUMN cols INTEGER NOT NULL DEFAULT 2")
+                else:
+                    await db.execute(f"ALTER TABLE games ADD COLUMN {col} TEXT NOT NULL DEFAULT '[]'")
+            except aiosqlite.OperationalError:
+                pass
+        try:
+            await db.execute("ALTER TABLE games ADD COLUMN last_move_at REAL DEFAULT 0")
+        except aiosqlite.OperationalError:
+            pass
         try:
             await db.execute("ALTER TABLE game_moves ADD COLUMN role_type TEXT")
         except aiosqlite.OperationalError:
             pass
-        try:
-            await db.execute("ALTER TABLE games ADD COLUMN rewards TEXT NOT NULL DEFAULT '[]'")
-        except aiosqlite.OperationalError:
-            pass
         await db.commit()
 
+# ---------- Роли (базовый набор, будет обрезаться под количество) ----------
+ALL_ROLES = [
+    # МИРНЫЕ
+    {"name": "Мирный житель", "emoji": "👤", "side": "civilian", "role_type": "citizen",
+     "desc": "Простой житель Нью-Йорка.", "powers": "Голосуешь днём."},
+    {"name": "Мирный житель", "emoji": "👤", "side": "civilian", "role_type": "citizen",
+     "desc": "Простой житель Нью-Йорка.", "powers": "Голосуешь днём."},
+    {"name": "Мирный житель", "emoji": "👤", "side": "civilian", "role_type": "citizen",
+     "desc": "Простой житель Нью-Йорка.", "powers": "Голосуешь днём."},
+    {"name": "Бомж", "emoji": "🏚️", "side": "neutral", "role_type": "bum",
+     "desc": "Бездомный. Тебе никто не верит.", "powers": "Не лечится. Виден как нейтрал."},
+    {"name": "Капитан Америка", "emoji": "🦸", "side": "civilian", "role_type": "sergeant",
+     "desc": "Сержант. Лидер.", "powers": "Двойной голос."},
+    {"name": "Сорвиголова", "emoji": "⚖️", "side": "civilian", "role_type": "lawyer",
+     "desc": "Адвокат. Защитник.", "powers": "Спасает от казни."},
+    {"name": "Ник Фьюри", "emoji": "🕵️", "side": "civilian", "role_type": "commissioner",
+     "desc": "Комиссар. Глава Щ.И.Т.", "powers": "Проверяет сторону."},
+    {"name": "Доктор Стрэндж", "emoji": "💉", "side": "civilian", "role_type": "doctor",
+     "desc": "Верховный маг.", "powers": "Лечит."},
+    {"name": "Булзай", "emoji": "🎯", "side": "civilian", "role_type": "sniper",
+     "desc": "Снайпер.", "powers": "Один выстрел."},
+    # МАФИЯ
+    {"name": "Кингпин", "emoji": "👑", "side": "mafia", "role_type": "don",
+     "desc": "Дон мафии.", "powers": "Решающий голос."},
+    {"name": "Чёрная Вдова", "emoji": "🕷️", "side": "mafia", "role_type": "mistress",
+     "desc": "Любовница.", "powers": "Блокирует роль."},
+    # НЕЙТРАЛЫ
+    {"name": "Дэдпул", "emoji": "🃏", "side": "neutral", "role_type": "suicide",
+     "desc": "Самоубийца.", "powers": "Забирает убийцу."},
+    {"name": "Домино", "emoji": "🍀", "side": "neutral", "role_type": "lucky",
+     "desc": "Счастливчик.", "powers": "Выживает раз."},
+    {"name": "Клетус Кесседи", "emoji": "🩸", "side": "neutral", "role_type": "maniac",
+     "desc": "Маньяк.", "powers": "Убивает ночью."},
+    {"name": "Зелёный Гоблин", "emoji": "🎃", "side": "neutral", "role_type": "kamikaze",
+     "desc": "Камикадзе.", "powers": "Взрывает."},
+]
+
 # ---------- Клавиатуры ----------
-def build_game_keyboard(game_id: int, taken_cells: dict) -> InlineKeyboardMarkup:
+def build_game_keyboard(game_id: int, rows: int, cols: int, taken_cells: dict) -> InlineKeyboardMarkup:
     keyboard = []
-    for r in range(ROWS):
+    for r in range(rows):
         row_buttons = []
-        for c in range(COLS):
-            idx = r * COLS + c
+        for c in range(cols):
+            idx = r * cols + c
             if idx in taken_cells:
                 username = taken_cells[idx]
                 display = f"@{username}" if len(username) <= 10 else f"@{username[:8]}…"
@@ -177,23 +169,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(
         "🦸 <b>МАФИЯ MARVEL</b>\n\n"
-        "Классическая мафия с героями и злодеями Marvel!\n"
-        "14 ролей, 7 мирных, 2 мафии, 5 нейтралов.\n\n"
-        "🎁 <b>Новое:</b> награды для победителей!\n"
-        "Настройте призы перед игрой.",
+        "Классическая мафия с героями Marvel!\n"
+        "🎁 Награды для победителей!\n"
+        "👥 Выбор количества участников!\n\n"
+        "Нажмите «🆕 Новая игра Мафия».",
         reply_markup=MAIN_KEYBOARD,
         parse_mode=ParseMode.HTML
     )
 
 # ---------- Настройка наград ----------
 async def setup_rewards_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Начинает настройку наград."""
     if update.effective_chat.type != "private":
         return
-
     user_id = update.effective_user.id
-    
-    # Проверяем, есть ли активная игра
     async with aiosqlite.connect(DB_PATH) as db:
         game = await db.execute_fetchall(
             "SELECT id FROM games WHERE created_by=? AND (status='pending' OR status='active') ORDER BY id DESC LIMIT 1",
@@ -206,208 +194,116 @@ async def setup_rewards_start(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     context.user_data["reward_game_id"] = game_id
     context.user_data["reward_state"] = "awaiting_civilian_text"
-
     await update.message.reply_text(
         "🎁 <b>НАСТРОЙКА НАГРАД</b>\n\n"
-        "Вы можете установить награды для трёх сторон:\n"
-        "🛡️ Мирные\n"
-        "👑 Мафия\n"
-        "⚡ Нейтралы\n\n"
-        "<b>Этап 1/3:</b> Введите название награды для <b>МИРНЫХ</b>.\n"
-        "(или «-» если награды нет)",
+        "Этап 1/3: Введите название награды для <b>МИРНЫХ</b>.\n(или «-» если нет)",
         parse_mode=ParseMode.HTML
     )
 
 async def process_reward_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает текст награды."""
     if update.effective_chat.type != "private":
         return
-
     state = context.user_data.get("reward_state")
-    game_id = context.user_data.get("reward_game_id")
-    if not state or not game_id:
+    if not state:
         return
-
     text = update.message.text.strip()
 
     if state == "awaiting_civilian_text":
-        if text != "-":
-            context.user_data["civilian_reward_text"] = text
-            context.user_data["reward_state"] = "awaiting_civilian_photo"
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Да", callback_data="reward_photo_yes"),
-                 InlineKeyboardButton("❌ Нет", callback_data="reward_photo_no")]
-            ])
-            await update.message.reply_text(
-                f"🛡️ Награда для мирных: <b>{text}</b>\n"
-                "Хотите прикрепить фото?",
-                reply_markup=keyboard,
-                parse_mode=ParseMode.HTML
-            )
-        else:
-            context.user_data["civilian_reward_text"] = ""
-            context.user_data["civilian_reward_photo"] = None
-            context.user_data["reward_state"] = "awaiting_mafia_text"
-            await update.message.reply_text(
-                "👑 <b>Этап 2/3:</b> Введите название награды для <b>МАФИИ</b>.\n"
-                "(или «-» если награды нет)",
-                parse_mode=ParseMode.HTML
-            )
+        context.user_data["civilian_reward_text"] = "" if text == "-" else text
+        context.user_data["reward_state"] = "awaiting_civilian_photo"
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Да", callback_data="reward_photo_yes"),
+             InlineKeyboardButton("❌ Нет", callback_data="reward_photo_no")]
+        ])
+        await update.message.reply_text("Прикрепить фото для мирных?", reply_markup=keyboard)
 
     elif state == "awaiting_mafia_text":
-        if text != "-":
-            context.user_data["mafia_reward_text"] = text
-            context.user_data["reward_state"] = "awaiting_mafia_photo"
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Да", callback_data="reward_photo_yes"),
-                 InlineKeyboardButton("❌ Нет", callback_data="reward_photo_no")]
-            ])
-            await update.message.reply_text(
-                f"👑 Награда для мафии: <b>{text}</b>\n"
-                "Хотите прикрепить фото?",
-                reply_markup=keyboard,
-                parse_mode=ParseMode.HTML
-            )
-        else:
-            context.user_data["mafia_reward_text"] = ""
-            context.user_data["mafia_reward_photo"] = None
-            context.user_data["reward_state"] = "awaiting_neutral_text"
-            await update.message.reply_text(
-                "⚡ <b>Этап 3/3:</b> Введите название награды для <b>НЕЙТРАЛОВ</b>.\n"
-                "(или «-» если награды нет)",
-                parse_mode=ParseMode.HTML
-            )
+        context.user_data["mafia_reward_text"] = "" if text == "-" else text
+        context.user_data["reward_state"] = "awaiting_mafia_photo"
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Да", callback_data="reward_photo_yes"),
+             InlineKeyboardButton("❌ Нет", callback_data="reward_photo_no")]
+        ])
+        await update.message.reply_text("Прикрепить фото для мафии?", reply_markup=keyboard)
 
     elif state == "awaiting_neutral_text":
-        if text != "-":
-            context.user_data["neutral_reward_text"] = text
-            context.user_data["reward_state"] = "awaiting_neutral_photo"
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Да", callback_data="reward_photo_yes"),
-                 InlineKeyboardButton("❌ Нет", callback_data="reward_photo_no")]
-            ])
-            await update.message.reply_text(
-                f"⚡ Награда для нейтралов: <b>{text}</b>\n"
-                "Хотите прикрепить фото?",
-                reply_markup=keyboard,
-                parse_mode=ParseMode.HTML
-            )
-        else:
-            context.user_data["neutral_reward_text"] = ""
-            context.user_data["neutral_reward_photo"] = None
-            await save_all_rewards(update, context)
+        context.user_data["neutral_reward_text"] = "" if text == "-" else text
+        context.user_data["reward_state"] = "awaiting_neutral_photo"
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Да", callback_data="reward_photo_yes"),
+             InlineKeyboardButton("❌ Нет", callback_data="reward_photo_no")]
+        ])
+        await update.message.reply_text("Прикрепить фото для нейтралов?", reply_markup=keyboard)
 
 async def handle_reward_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Принимает фото для награды."""
     if update.effective_chat.type != "private":
         return
-
     state = context.user_data.get("reward_state")
     if not state or "photo" not in state:
         return
-
-    if update.message.photo:
-        photo_id = update.message.photo[-1].file_id
-        
-        if state == "awaiting_civilian_photo":
-            context.user_data["civilian_reward_photo"] = photo_id
-            context.user_data["reward_state"] = "awaiting_mafia_text"
-            await update.message.reply_text(
-                "👑 <b>Этап 2/3:</b> Введите название награды для <b>МАФИИ</b>.\n"
-                "(или «-» если награды нет)",
-                parse_mode=ParseMode.HTML
-            )
-        elif state == "awaiting_mafia_photo":
-            context.user_data["mafia_reward_photo"] = photo_id
-            context.user_data["reward_state"] = "awaiting_neutral_text"
-            await update.message.reply_text(
-                "⚡ <b>Этап 3/3:</b> Введите название награды для <b>НЕЙТРАЛОВ</b>.\n"
-                "(или «-» если награды нет)",
-                parse_mode=ParseMode.HTML
-            )
-        elif state == "awaiting_neutral_photo":
-            context.user_data["neutral_reward_photo"] = photo_id
-            await save_all_rewards(update, context)
-    else:
-        await update.message.reply_text("❌ Пожалуйста, отправьте фото.")
-
-async def save_all_rewards(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Сохраняет все награды в БД."""
-    game_id = context.user_data.get("reward_game_id")
-    if not game_id:
-        await update.message.reply_text("❌ Ошибка: игра не найдена.")
+    if not update.message.photo:
+        await update.message.reply_text("❌ Отправьте фото.")
         return
 
-    rewards = {
-        "civilian": {
-            "text": context.user_data.get("civilian_reward_text", ""),
-            "photo": context.user_data.get("civilian_reward_photo", None)
-        },
-        "mafia": {
-            "text": context.user_data.get("mafia_reward_text", ""),
-            "photo": context.user_data.get("mafia_reward_photo", None)
-        },
-        "neutral": {
-            "text": context.user_data.get("neutral_reward_text", ""),
-            "photo": context.user_data.get("neutral_reward_photo", None)
-        }
-    }
+    photo_id = update.message.photo[-1].file_id
+    if state == "awaiting_civilian_photo":
+        context.user_data["civilian_reward_photo"] = photo_id
+        context.user_data["reward_state"] = "awaiting_mafia_text"
+        await update.message.reply_text("👑 Введите награду для МАФИИ (или «-»):")
+    elif state == "awaiting_mafia_photo":
+        context.user_data["mafia_reward_photo"] = photo_id
+        context.user_data["reward_state"] = "awaiting_neutral_text"
+        await update.message.reply_text("⚡ Введите награду для НЕЙТРАЛОВ (или «-»):")
+    elif state == "awaiting_neutral_photo":
+        context.user_data["neutral_reward_photo"] = photo_id
+        await save_all_rewards(update, context)
 
+async def save_all_rewards(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    game_id = context.user_data.get("reward_game_id")
+    if not game_id:
+        await update.message.reply_text("❌ Игра не найдена.")
+        return
+    rewards = {
+        "civilian": {"text": context.user_data.get("civilian_reward_text", ""), "photo": context.user_data.get("civilian_reward_photo")},
+        "mafia": {"text": context.user_data.get("mafia_reward_text", ""), "photo": context.user_data.get("mafia_reward_photo")},
+        "neutral": {"text": context.user_data.get("neutral_reward_text", ""), "photo": context.user_data.get("neutral_reward_photo")}
+    }
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE games SET rewards=? WHERE id=?", (json.dumps(rewards), game_id))
         await db.commit()
-
-    # Очистка
-    for key in ["reward_game_id", "reward_state", "civilian_reward_text", "civilian_reward_photo",
-                "mafia_reward_text", "mafia_reward_photo", "neutral_reward_text", "neutral_reward_photo"]:
-        context.user_data.pop(key, None)
-
-    # Показываем сводку
-    text = "✅ <b>НАГРАДЫ НАСТРОЕНЫ!</b>\n\n"
-    text += f"🛡️ Мирные: {rewards['civilian']['text'] or 'Нет награды'}\n"
-    text += f"👑 Мафия: {rewards['mafia']['text'] or 'Нет награды'}\n"
-    text += f"⚡ Нейтралы: {rewards['neutral']['text'] or 'Нет награды'}\n"
-
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=MAIN_KEYBOARD)
+    for key in list(context.user_data.keys()):
+        if "reward" in key:
+            del context.user_data[key]
+    text = "✅ Награды:\n"
+    text += f"🛡️ Мирные: {rewards['civilian']['text'] or 'Нет'}\n"
+    text += f"👑 Мафия: {rewards['mafia']['text'] or 'Нет'}\n"
+    text += f"⚡ Нейтралы: {rewards['neutral']['text'] or 'Нет'}"
+    await update.message.reply_text(text, reply_markup=MAIN_KEYBOARD)
 
 # ---------- Вручение наград ----------
 async def give_rewards(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправляет награды победителям в чат."""
     if update.effective_chat.type != "private":
         return
-
     user_id = update.effective_user.id
     async with aiosqlite.connect(DB_PATH) as db:
         game = await db.execute_fetchall(
-            "SELECT id, chat_id, rewards, status FROM games WHERE created_by=? AND (status='active' OR status='finished') ORDER BY id DESC LIMIT 1",
+            "SELECT id, chat_id, rewards, status FROM games WHERE created_by=? AND status='finished' ORDER BY id DESC LIMIT 1",
             (user_id,)
         )
         if not game:
-            await update.message.reply_text("❌ У вас нет игры.", reply_markup=MAIN_KEYBOARD)
+            await update.message.reply_text("❌ Нет завершённой игры.", reply_markup=MAIN_KEYBOARD)
             return
-        
-        game_id, chat_id, rewards_json, status = game[0]
-        
-        if status == 'active':
-            await update.message.reply_text("⚠️ Игра ещё активна. Сначала остановите игру кнопкой «🛑 Остановить игру».", reply_markup=MAIN_KEYBOARD)
-            return
-
+        game_id, chat_id, rewards_json, _ = game[0]
         rewards = json.loads(rewards_json) if rewards_json else {}
         if not rewards:
-            await update.message.reply_text("❌ Награды не были настроены. Нажмите «🎁 Настроить награды».", reply_markup=MAIN_KEYBOARD)
+            await update.message.reply_text("❌ Награды не настроены.", reply_markup=MAIN_KEYBOARD)
             return
 
-        # Собираем победителей
-        moves = await db.execute_fetchall(
-            "SELECT username, role_side FROM game_moves WHERE game_id=?", (game_id,)
-        )
-        
-        # Определяем победившую сторону
+        moves = await db.execute_fetchall("SELECT username, role_side FROM game_moves WHERE game_id=?", (game_id,))
         alive_civilian = sum(1 for m in moves if m[1] == "civilian")
         alive_mafia = sum(1 for m in moves if m[1] == "mafia")
         alive_neutral = sum(1 for m in moves if m[1] == "neutral")
 
-        # Логика победы: мафия побеждает если их столько же или больше мирных
         if alive_mafia >= alive_civilian and alive_mafia > 0:
             winning_side = "mafia"
             winners = [m[0] for m in moves if m[1] == "mafia"]
@@ -420,46 +316,29 @@ async def give_rewards(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         reward = rewards.get(winning_side, {})
         reward_text = reward.get("text", "")
-        reward_photo = reward.get("photo", None)
+        reward_photo = reward.get("photo")
 
         if not reward_text and not reward_photo:
-            await update.message.reply_text(f"🏆 Победила сторона: {winning_side}, но награда не была настроена.", reply_markup=MAIN_KEYBOARD)
+            await update.message.reply_text(f"🏆 Победили {winning_side}, но награда не настроена.", reply_markup=MAIN_KEYBOARD)
             return
 
-        # Отправляем награду в чат
-        side_names = {"civilian": "🛡️ МИРНЫЕ (Мстители)", "mafia": "👑 МАФИЯ (Кингпин)", "neutral": "⚡ НЕЙТРАЛЫ"}
+        side_names = {"civilian": "🛡️ МИРНЫЕ", "mafia": "👑 МАФИЯ", "neutral": "⚡ НЕЙТРАЛЫ"}
         winner_list = "\n".join([f"@{w}" for w in winners])
-
-        caption = (
-            f"🏆 <b>ПОБЕДИТЕЛИ ИГРЫ #{game_id}!</b>\n\n"
-            f"{side_names[winning_side]}\n\n"
-            f"<b>Победители ({len(winners)}):</b>\n{winner_list}\n\n"
-            f"🎁 <b>Награда:</b> {reward_text}"
-        )
+        caption = f"🏆 <b>ПОБЕДИТЕЛИ #{game_id}!</b>\n\n{side_names[winning_side]}\n\n<b>Победители ({len(winners)}):</b>\n{winner_list}\n\n🎁 <b>Награда:</b> {reward_text}"
 
         try:
             if reward_photo:
-                await context.bot.send_photo(
-                    chat_id=chat_id,
-                    photo=reward_photo,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML
-                )
+                await context.bot.send_photo(chat_id=chat_id, photo=reward_photo, caption=caption, parse_mode=ParseMode.HTML)
             else:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=caption,
-                    parse_mode=ParseMode.HTML
-                )
-            await update.message.reply_text("🏆 Награды отправлены в чат!", reply_markup=MAIN_KEYBOARD)
+                await context.bot.send_message(chat_id=chat_id, text=caption, parse_mode=ParseMode.HTML)
+            await update.message.reply_text("🏆 Награды отправлены!", reply_markup=MAIN_KEYBOARD)
         except Exception as e:
-            await update.message.reply_text(f"❌ Ошибка отправки: {e}", reply_markup=MAIN_KEYBOARD)
+            await update.message.reply_text(f"❌ Ошибка: {e}", reply_markup=MAIN_KEYBOARD)
 
 # ---------- Раскрытие ролей ----------
 async def reveal_roles(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
-
     user_id = update.effective_user.id
     async with aiosqlite.connect(DB_PATH) as db:
         game = await db.execute_fetchall(
@@ -467,138 +346,80 @@ async def reveal_roles(update: Update, context: ContextTypes.DEFAULT_TYPE):
             (user_id,)
         )
         if not game:
-            await update.message.reply_text("❌ У вас нет активной игры.", reply_markup=MAIN_KEYBOARD)
+            await update.message.reply_text("❌ Нет активной игры.", reply_markup=MAIN_KEYBOARD)
             return
         game_id, roles_json = game[0]
         roles = json.loads(roles_json)
-
         moves = await db.execute_fetchall(
             "SELECT cell_index, username, role_name, role_emoji, role_side, role_type FROM game_moves WHERE game_id=?", (game_id,)
         )
         taken = {m[0]: m for m in moves}
 
-    text = f"🔍 <b>РАСКРЫТИЕ РОЛЕЙ — Игра #{game_id}</b>\n\n"
+    type_names = {"citizen": "Мирный", "bum": "Бомж", "sergeant": "Сержант", "lawyer": "Адвокат", "commissioner": "Комиссар", "doctor": "Доктор", "sniper": "Снайпер", "don": "Дон", "mistress": "Любовница", "suicide": "Самоубийца", "lucky": "Счастливчик", "maniac": "Маньяк", "kamikaze": "Камикадзе"}
 
-    text += "🛡️ <b>МИРНЫЕ:</b>\n"
-    for i, role in enumerate(roles):
-        if role["side"] == "civilian":
-            if i in taken:
-                _, uname, rname, remoji, rside, rtype = taken[i]
-                type_desc = {"citizen": "Мирный", "sergeant": "Сержант", "lawyer": "Адвокат", "commissioner": "Комиссар", "doctor": "Доктор", "sniper": "Снайпер"}.get(rtype, "")
-                text += f"  {remoji} {rname} ({type_desc}) → @{uname}\n"
-            else:
-                type_desc = {"citizen": "Мирный", "sergeant": "Сержант", "lawyer": "Адвокат", "commissioner": "Комиссар", "doctor": "Доктор", "sniper": "Снайпер"}.get(role["role_type"], "")
-                text += f"  {role['emoji']} {role['name']} ({type_desc}) — свободна\n"
-
-    text += "\n👑 <b>МАФИЯ:</b>\n"
-    for i, role in enumerate(roles):
-        if role["side"] == "mafia":
-            if i in taken:
-                _, uname, rname, remoji, rside, rtype = taken[i]
-                type_desc = {"don": "Дон", "mistress": "Любовница"}.get(rtype, "")
-                text += f"  {remoji} {rname} ({type_desc}) → @{uname}\n"
-            else:
-                type_desc = {"don": "Дон", "mistress": "Любовница"}.get(role["role_type"], "")
-                text += f"  {role['emoji']} {role['name']} ({type_desc}) — свободна\n"
-
-    text += "\n⚡ <b>НЕЙТРАЛЫ:</b>\n"
-    for i, role in enumerate(roles):
-        if role["side"] == "neutral":
-            if i in taken:
-                _, uname, rname, remoji, rside, rtype = taken[i]
-                type_desc = {"suicide": "Самоубийца", "lucky": "Счастливчик", "maniac": "Маньяк", "kamikaze": "Камикадзе", "bum": "Бомж"}.get(rtype, "")
-                text += f"  {remoji} {rname} ({type_desc}) → @{uname}\n"
-            else:
-                type_desc = {"suicide": "Самоубийца", "lucky": "Счастливчик", "maniac": "Маньяк", "kamikaze": "Камикадзе", "bum": "Бомж"}.get(role["role_type"], "")
-                text += f"  {role['emoji']} {role['name']} ({type_desc}) — свободна\n"
-
+    text = f"🔍 <b>РОЛИ ИГРЫ #{game_id}</b>\n"
+    for side, header in [("civilian", "🛡️ МИРНЫЕ"), ("mafia", "👑 МАФИЯ"), ("neutral", "⚡ НЕЙТРАЛЫ")]:
+        text += f"\n<b>{header}:</b>\n"
+        for i, role in enumerate(roles):
+            if role["side"] == side:
+                if i in taken:
+                    _, uname, rname, remoji, _, rtype = taken[i]
+                    text += f"  {remoji} {rname} ({type_names.get(rtype, '')}) → @{uname}\n"
+                else:
+                    text += f"  {role['emoji']} {role['name']} ({type_names.get(role['role_type'], '')}) — свободна\n"
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=MAIN_KEYBOARD)
 
 # ---------- Статистика ----------
 async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
-
     user_id = update.effective_user.id
     async with aiosqlite.connect(DB_PATH) as db:
         game = await db.execute_fetchall(
-            "SELECT id, roles FROM games WHERE created_by=? AND status='active' ORDER BY id DESC LIMIT 1",
+            "SELECT id, rows, cols, roles FROM games WHERE created_by=? AND status='active' ORDER BY id DESC LIMIT 1",
             (user_id,)
         )
         if not game:
-            await update.message.reply_text("❌ У вас нет активной игры.", reply_markup=MAIN_KEYBOARD)
+            await update.message.reply_text("❌ Нет активной игры.", reply_markup=MAIN_KEYBOARD)
             return
-        game_id, roles_json = game[0]
+        game_id, rows, cols, roles_json = game[0]
         roles = json.loads(roles_json)
-
-        moves = await db.execute_fetchall(
-            "SELECT COUNT(*) FROM game_moves WHERE game_id=?", (game_id,)
-        )
-        taken_count = moves[0][0] if moves else 0
+        total = rows * cols
+        moves = await db.execute_fetchall("SELECT COUNT(*) FROM game_moves WHERE game_id=?", (game_id,))
+        taken = moves[0][0] if moves else 0
 
     civilians = sum(1 for r in roles if r["side"] == "civilian")
     mafia = sum(1 for r in roles if r["side"] == "mafia")
     neutral = sum(1 for r in roles if r["side"] == "neutral")
-    remaining = TOTAL_CELLS - taken_count
-
-    text = (
-        f"📊 <b>СТАТИСТИКА ИГРЫ #{game_id}</b>\n\n"
-        f"<b>Всего ячеек:</b> {TOTAL_CELLS}\n"
-        f"<b>Выбрано:</b> {taken_count}\n"
-        f"<b>Осталось:</b> {remaining}\n\n"
-        f"<b>По сторонам:</b>\n"
-        f"🛡️ Мирные: {civilians}\n"
-        f"👑 Мафия: {mafia}\n"
-        f"⚡ Нейтралы: {neutral}\n"
+    await update.message.reply_text(
+        f"📊 <b>СТАТИСТИКА #{game_id}</b>\n\n"
+        f"Сетка: {rows}×{cols} = {total}\n"
+        f"Выбрано: {taken}\nОсталось: {total - taken}\n\n"
+        f"🛡️ Мирные: {civilians}\n👑 Мафия: {mafia}\n⚡ Нейтралы: {neutral}",
+        parse_mode=ParseMode.HTML, reply_markup=MAIN_KEYBOARD
     )
-
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=MAIN_KEYBOARD)
 
 # ---------- Обработчик меню ----------
 async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
-
     text = update.message.text.strip()
     user_id = update.effective_user.id
 
-    # Проверяем, не в режиме ли настройки наград
-    reward_state = context.user_data.get("reward_state")
-    if reward_state and "text" in reward_state:
+    # Если в режиме настройки наград
+    if context.user_data.get("reward_state") and "text" in context.user_data["reward_state"]:
         await process_reward_text(update, context)
         return
 
     if text == "🆕 Новая игра Мафия":
         context.user_data.clear()
-        
-        shuffled = random.sample(ROLES, len(ROLES))
-        roles_json = json.dumps(shuffled)
-
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute(
-                "INSERT INTO games (chat_id, roles, status, created_by) VALUES (?, ?, ?, ?)",
-                ("", roles_json, "pending", user_id)
-            )
-            game_id = cursor.lastrowid
-            await db.commit()
-
-        context.user_data["game_id"] = game_id
-        context.user_data["state"] = "ready"
-
-        civilians = sum(1 for r in shuffled if r["side"] == "civilian")
-        mafia = sum(1 for r in shuffled if r["side"] == "mafia")
-        neutral = sum(1 for r in shuffled if r["side"] == "neutral")
-
+        context.user_data["state"] = "awaiting_players"
         await update.message.reply_text(
-            f"🦸 Игра Мафия #{game_id} создана!\n\n"
-            f"📊 <b>Состав:</b>\n"
-            f"🛡️ Мирные: {civilians}\n"
-            f"👑 Мафия: {mafia}\n"
-            f"⚡ Нейтралы: {neutral}\n\n"
-            "Нажмите «🎁 Настроить награды», чтобы установить призы.\n"
-            "Затем «📤 Опубликовать игру».",
-            parse_mode=ParseMode.HTML,
-            reply_markup=MAIN_KEYBOARD
+            f"👥 <b>ВЫБОР КОЛИЧЕСТВА УЧАСТНИКОВ</b>\n\n"
+            f"Введите число игроков (от 2 до {MAX_CELLS}).\n"
+            f"Бот подберёт оптимальную сетку.\n\n"
+            f"<i>Рекомендуется от 10 до 14 для полного набора ролей.</i>",
+            parse_mode=ParseMode.HTML
         )
         return
 
@@ -606,102 +427,127 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         async with aiosqlite.connect(DB_PATH) as db:
             row = await db.execute_fetchall(
-                "SELECT id, roles FROM games WHERE created_by=? AND status='pending' ORDER BY id DESC LIMIT 1",
+                "SELECT id FROM games WHERE created_by=? AND status='pending' ORDER BY id DESC LIMIT 1",
                 (user_id,)
             )
             if not row:
                 await update.message.reply_text("❌ Нет готовой игры.", reply_markup=MAIN_KEYBOARD)
                 return
-            game_id, roles_json = row[0]
-
+            game_id = row[0][0]
         context.user_data["game_id"] = game_id
         context.user_data["state"] = "awaiting_chat"
-        await update.message.reply_text(
-            "Введите @username чата или канала для публикации игры.\n"
-            "Бот должен быть администратором в этом чате/канале."
-        )
+        await update.message.reply_text("Введите @username чата/канала для публикации:")
         return
 
     if text == "🛑 Остановить игру":
         await stop_active_game(update, context)
         return
-
     if text == "🔍 Раскрыть роли":
         await reveal_roles(update, context)
         return
-
     if text == "🏆 Вручить награды":
         await give_rewards(update, context)
         return
-
     if text == "📊 Статистика":
         await show_stats(update, context)
         return
-
     if text == "🎁 Настроить награды":
         await setup_rewards_start(update, context)
         return
-
     if text == "❓ Помощь":
         await update.message.reply_text(
-            "🦸 <b>МАФИЯ MARVEL — ПРАВИЛА</b>\n\n"
-            "<b>14 ролей (7×2):</b>\n\n"
-            "🛡️ <b>МИРНЫЕ (7):</b>\n"
-            "👤 Мирный житель (2)\n"
-            "🏚️ Бомж\n"
-            "🦸 Капитан Америка — Сержант\n"
-            "⚖️ Сорвиголова — Адвокат\n"
-            "🕵️ Ник Фьюри — Комиссар\n"
-            "🎯 Булзай — Снайпер\n"
-            "💉 Доктор Стрэндж — Доктор\n\n"
-            "👑 <b>МАФИЯ (2):</b>\n"
-            "👑 Кингпин — Дон\n"
-            "🕷️ Чёрная Вдова — Любовница\n\n"
-            "⚡ <b>НЕЙТРАЛЫ (5):</b>\n"
-            "🃏 Дэдпул — Самоубийца\n"
-            "🍀 Домино — Счастливчик\n"
-            "🩸 Клетус Кесседи — Маньяк\n"
-            "🎃 Зелёный Гоблин — Камикадзе\n\n"
-            "<b>🏆 НАГРАДЫ:</b>\n"
-            "1️⃣ Нажмите «🎁 Настроить награды»\n"
-            "2️⃣ Введите текст и фото для каждой стороны\n"
-            "3️⃣ После игры нажмите «🏆 Вручить награды»\n"
-            "Бот отправит призы в чат!",
-            parse_mode=ParseMode.HTML,
-            reply_markup=MAIN_KEYBOARD
+            "🦸 <b>МАФИЯ MARVEL</b>\n\n"
+            "1️⃣ «🆕 Новая игра» → введите число игроков\n"
+            "2️⃣ «🎁 Настроить награды» → призы\n"
+            "3️⃣ «📤 Опубликовать» → @чат\n"
+            "4️⃣ После игры «🛑 Остановить» → «🏆 Вручить»\n\n"
+            "<b>Роли:</b> Мирные, Мафия, Нейтралы\n"
+            "<b>Кулдаун:</b> 2 сек между ходами",
+            parse_mode=ParseMode.HTML, reply_markup=MAIN_KEYBOARD
         )
         return
 
     state = context.user_data.get("state")
-    if state == "awaiting_chat":
+    if state == "awaiting_players":
+        await process_players(update, context)
+    elif state == "awaiting_chat":
         await process_chat_input(update, context)
     else:
         await update.message.reply_text("Используйте кнопки меню.", reply_markup=MAIN_KEYBOARD)
+
+async def process_players(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        num = int(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("❌ Введите число.")
+        return
+    if num < 2 or num > MAX_CELLS:
+        await update.message.reply_text(f"❌ От 2 до {MAX_CELLS}.")
+        return
+
+    # Подбираем сетку
+    if num <= 14:
+        rows, cols = (num + 1) // 2, 2
+    elif num <= 21:
+        rows, cols = (num + 2) // 3, 3
+    else:
+        rows, cols = (num + 3) // 4, 4
+    total = rows * cols
+    # Берём первые num ролей из списка
+    selected_roles = ALL_ROLES[:num]
+    if len(selected_roles) < total:
+        # Добавляем мирных жителей до заполнения
+        while len(selected_roles) < total:
+            selected_roles.append({"name": "Мирный житель", "emoji": "👤", "side": "civilian", "role_type": "citizen",
+                                   "desc": "Простой житель.", "powers": "Голосуешь."})
+    # Если ролей больше, чем ячеек (не должно быть), обрезаем
+    selected_roles = selected_roles[:total]
+
+    shuffled = random.sample(selected_roles, len(selected_roles))
+    roles_json = json.dumps(shuffled)
+    user_id = update.effective_user.id
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "INSERT INTO games (chat_id, rows, cols, roles, status, created_by) VALUES (?, ?, ?, ?, ?, ?)",
+            ("", rows, cols, roles_json, "pending", user_id)
+        )
+        game_id = cursor.lastrowid
+        await db.commit()
+
+    context.user_data["state"] = "ready"
+    civilians = sum(1 for r in shuffled if r["side"] == "civilian")
+    mafia = sum(1 for r in shuffled if r["side"] == "mafia")
+    neutral = sum(1 for r in shuffled if r["side"] == "neutral")
+
+    await update.message.reply_text(
+        f"🦸 Игра #{game_id} создана!\n\n"
+        f"📐 Сетка: {rows}×{cols} = {total} ячеек\n"
+        f"🛡️ Мирные: {civilians}\n👑 Мафия: {mafia}\n⚡ Нейтралы: {neutral}\n\n"
+        "Нажмите «🎁 Настроить награды», затем «📤 Опубликовать».",
+        reply_markup=MAIN_KEYBOARD
+    )
 
 # ---------- Callback-обработчик ----------
 async def grid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
 
-    # Обработка колбэков настройки наград
     if data in ("reward_photo_yes", "reward_photo_no"):
         state = context.user_data.get("reward_state")
         if data == "reward_photo_yes":
-            await query.edit_message_text("📷 Отправьте фото для награды.")
+            await query.edit_message_text("📷 Отправьте фото.")
         else:
-            # Пропускаем фото
             if state == "awaiting_civilian_photo":
                 context.user_data["civilian_reward_photo"] = None
                 context.user_data["reward_state"] = "awaiting_mafia_text"
-                await query.edit_message_text("👑 Введите название награды для МАФИИ (или «-»).")
+                await query.edit_message_text("👑 Введите награду для МАФИИ (или «-»):")
             elif state == "awaiting_mafia_photo":
                 context.user_data["mafia_reward_photo"] = None
                 context.user_data["reward_state"] = "awaiting_neutral_text"
-                await query.edit_message_text("⚡ Введите название награды для НЕЙТРАЛОВ (или «-»).")
+                await query.edit_message_text("⚡ Введите награду для НЕЙТРАЛОВ (или «-»):")
             elif state == "awaiting_neutral_photo":
                 context.user_data["neutral_reward_photo"] = None
-                await query.edit_message_text("✅ Награды настроены!")
-                # Сохраняем
                 await save_all_rewards_callback(update, context)
         await query.answer()
         return
@@ -716,14 +562,23 @@ async def grid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         async with aiosqlite.connect(DB_PATH) as db:
             game = await db.execute_fetchall(
-                "SELECT chat_id, message_id, roles, status FROM games WHERE id=?", (game_id,)
+                "SELECT chat_id, message_id, rows, cols, roles, status, last_move_at FROM games WHERE id=?",
+                (game_id,)
             )
-            if not game or game[0][3] != "active":
+            if not game or game[0][5] != "active":
                 await query.answer("Игра неактивна.", show_alert=True)
                 return
-            chat_id, message_id, roles_json, _ = game[0]
+            chat_id, message_id, rows, cols, roles_json, _, last_move = game[0]
             roles = json.loads(roles_json)
 
+            # Кулдаун
+            now = time.time()
+            if last_move and (now - last_move) < COOLDOWN_SECONDS:
+                remain = round(COOLDOWN_SECONDS - (now - last_move), 1)
+                await query.answer(f"⏳ Подождите {remain} сек.", show_alert=True)
+                return
+
+            # Проверка, не выбрал ли уже игрок роль
             exists = await db.execute_fetchall(
                 "SELECT 1 FROM game_moves WHERE game_id=? AND user_id=?", (game_id, user_id)
             )
@@ -731,161 +586,121 @@ async def grid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.answer("❗ Вы уже выбрали роль.", show_alert=True)
                 return
 
+            # Проверка занятости ячейки
             cell_taken = await db.execute_fetchall(
                 "SELECT 1 FROM game_moves WHERE game_id=? AND cell_index=?", (game_id, cell_idx)
             )
             if cell_taken:
-                await query.answer("⛔ Эта ячейка уже занята.", show_alert=True)
+                await query.answer("⛔ Ячейка уже занята.", show_alert=True)
                 return
 
-            role = roles[cell_idx]
-            role_name = role["name"]
-            role_emoji = role["emoji"]
-            role_side = role["side"]
-            role_type = role["role_type"]
-            role_desc = role["desc"]
-            role_powers = role["powers"]
-
+            # Транзакция с повторной проверкой
             try:
+                await db.execute("BEGIN IMMEDIATE")
+                if await db.execute_fetchall("SELECT 1 FROM game_moves WHERE game_id=? AND user_id=?", (game_id, user_id)):
+                    await db.execute("ROLLBACK")
+                    await query.answer("❗ Вы уже выбрали роль.", show_alert=True)
+                    return
+                if await db.execute_fetchall("SELECT 1 FROM game_moves WHERE game_id=? AND cell_index=?", (game_id, cell_idx)):
+                    await db.execute("ROLLBACK")
+                    await query.answer("⛔ Ячейка уже занята.", show_alert=True)
+                    return
+
+                role = roles[cell_idx]
                 await db.execute(
                     "INSERT INTO game_moves (game_id, user_id, username, cell_index, role_name, role_emoji, role_side, role_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (game_id, user_id, username, cell_idx, role_name, role_emoji, role_side, role_type)
+                    (game_id, user_id, username, cell_idx, role["name"], role["emoji"], role["side"], role["role_type"])
                 )
-                await db.commit()
+                await db.execute("UPDATE games SET last_move_at=? WHERE id=?", (now, game_id))
+                await db.execute("COMMIT")
             except aiosqlite.IntegrityError as e:
+                await db.execute("ROLLBACK")
                 if "cell_index" in str(e):
                     await query.answer("⛔ Ячейка уже занята.", show_alert=True)
                 else:
                     await query.answer("❗ Вы уже выбрали роль.", show_alert=True)
                 return
 
-            moves = await db.execute_fetchall(
-                "SELECT cell_index, username FROM game_moves WHERE game_id=?", (game_id,)
-            )
+            moves = await db.execute_fetchall("SELECT cell_index, username FROM game_moves WHERE game_id=?", (game_id,))
             taken_cells = {cell: uname for cell, uname in moves}
 
+        # Отправка роли в личку
+        role_side = role["side"]
         if role_side == "civilian":
-            side_text = "🛡️ Ты — МИРНЫЙ ЖИТЕЛЬ"
-            team_text = "Ты на стороне МСТИТЕЛЕЙ. Вычисли мафию!"
+            side_text = "🛡️ МИРНЫЙ"
+            team_text = "Ты с Мстителями!"
         elif role_side == "mafia":
-            side_text = "👑 Ты — МАФИЯ"
-            team_text = "Ты на стороне КИНГПИНА. Убей всех мирных!"
+            side_text = "👑 МАФИЯ"
+            team_text = "Ты с Кингпином!"
         else:
-            side_text = "⚡ Ты — НЕЙТРАЛ"
-            team_text = "Ты сам за себя. Выживи любой ценой!"
-
-        role_type_desc = {
-            "citizen": "Мирный житель", "bum": "Бомж", "sergeant": "Сержант",
-            "lawyer": "Адвокат", "commissioner": "Комиссар", "doctor": "Доктор",
-            "sniper": "Снайпер", "don": "Дон мафии", "mistress": "Любовница",
-            "suicide": "Самоубийца", "lucky": "Счастливчик", "maniac": "Маньяк",
-            "kamikaze": "Камикадзе"
-        }.get(role_type, "Неизвестно")
+            side_text = "⚡ НЕЙТРАЛ"
+            team_text = "Ты сам за себя!"
 
         role_message = (
-            f"🎭 <b>ТВОЯ РОЛЬ:</b> {role_emoji} <b>{role_name}</b>\n"
-            f"📋 <b>Тип:</b> {role_type_desc}\n\n"
-            f"{side_text}\n"
-            f"{team_text}\n\n"
-            f"📜 <b>Описание:</b> {role_desc}\n\n"
-            f"⚡ <b>Способности:</b> {role_powers}\n\n"
-            f"<i>🤫 Не показывай это сообщение другим игрокам!</i>"
+            f"🎭 <b>ТВОЯ РОЛЬ:</b> {role['emoji']} <b>{role['name']}</b>\n\n"
+            f"{side_text}\n{team_text}\n\n"
+            f"📜 {role['desc']}\n\n⚡ {role['powers']}\n\n"
+            f"<i>🤫 Не показывай никому!</i>"
         )
-
         try:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=role_message,
-                parse_mode=ParseMode.HTML
-            )
+            await context.bot.send_message(chat_id=user_id, text=role_message, parse_mode=ParseMode.HTML)
         except Exception as e:
             logger.error(f"Ошибка отправки роли: {e}")
-            await query.answer("❌ Сначала напишите боту в личку /start", show_alert=True)
+            await query.answer("❌ Напишите боту в личку /start", show_alert=True)
             return
 
-        await update_message_keyboard(
-            context.application, chat_id, message_id,
-            build_game_keyboard(game_id, taken_cells)
-        )
-        await query.answer(f"🎭 Роль получена! Проверьте личные сообщения.", show_alert=True)
+        await update_message_keyboard(context.application, chat_id, message_id, build_game_keyboard(game_id, rows, cols, taken_cells))
+        await query.answer("🎭 Роль в личке!", show_alert=True)
         return
 
     if data.startswith("occupied:"):
-        await query.answer("⛔ Эта ячейка уже занята.", show_alert=True)
+        await query.answer("⛔ Занято.", show_alert=True)
         return
-
     await query.answer()
 
 async def save_all_rewards_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Сохраняет награды при использовании колбэка."""
     game_id = context.user_data.get("reward_game_id")
     if not game_id:
-        await update.callback_query.answer("❌ Ошибка: игра не найдена.")
         return
-
     rewards = {
-        "civilian": {
-            "text": context.user_data.get("civilian_reward_text", ""),
-            "photo": context.user_data.get("civilian_reward_photo", None)
-        },
-        "mafia": {
-            "text": context.user_data.get("mafia_reward_text", ""),
-            "photo": context.user_data.get("mafia_reward_photo", None)
-        },
-        "neutral": {
-            "text": context.user_data.get("neutral_reward_text", ""),
-            "photo": context.user_data.get("neutral_reward_photo", None)
-        }
+        "civilian": {"text": context.user_data.get("civilian_reward_text", ""), "photo": context.user_data.get("civilian_reward_photo")},
+        "mafia": {"text": context.user_data.get("mafia_reward_text", ""), "photo": context.user_data.get("mafia_reward_photo")},
+        "neutral": {"text": context.user_data.get("neutral_reward_text", ""), "photo": context.user_data.get("neutral_reward_photo")}
     }
-
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE games SET rewards=? WHERE id=?", (json.dumps(rewards), game_id))
         await db.commit()
-
-    # Очистка
-    for key in ["reward_game_id", "reward_state", "civilian_reward_text", "civilian_reward_photo",
-                "mafia_reward_text", "mafia_reward_photo", "neutral_reward_text", "neutral_reward_photo"]:
-        context.user_data.pop(key, None)
-
+    for key in list(context.user_data.keys()):
+        if "reward" in key:
+            del context.user_data[key]
     await update.callback_query.answer("✅ Награды сохранены!")
 
-# ---------- Публикация в чат/канал ----------
+# ---------- Публикация ----------
 async def process_chat_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.message.text.strip()
     user_id = update.effective_user.id
     context.user_data.pop("state", None)
-
     async with aiosqlite.connect(DB_PATH) as db:
         row = await db.execute_fetchall(
-            "SELECT id FROM games WHERE created_by=? AND status='pending' ORDER BY id DESC LIMIT 1",
+            "SELECT id, rows, cols FROM games WHERE created_by=? AND status='pending' ORDER BY id DESC LIMIT 1",
             (user_id,)
         )
         if not row:
-            await update.message.reply_text("❌ Нет готовой игры.", reply_markup=MAIN_KEYBOARD)
+            await update.message.reply_text("❌ Нет игры.", reply_markup=MAIN_KEYBOARD)
             return
-        game_id = row[0][0]
-
+        game_id, rows, cols = row[0]
         try:
             msg = await context.bot.send_message(
                 chat_id=chat,
-                text=(
-                    "🦸 <b>МАФИЯ MARVEL</b>\n\n"
-                    "14 ролей! Мирные против Мафии.\n"
-                    "Выбери ячейку и узнай свою роль.\n"
-                    "Роль придёт тебе в личные сообщения. 🤫\n\n"
-                    "<i>Кто твой союзник, а кто — враг?</i>"
-                ),
-                reply_markup=build_game_keyboard(game_id, {}),
+                text=f"🦸 <b>МАФИЯ MARVEL</b>\n\n{rows}×{cols} = {rows*cols} ролей!\nВыбери ячейку → роль в личку 🤫",
+                reply_markup=build_game_keyboard(game_id, rows, cols, {}),
                 parse_mode=ParseMode.HTML
             )
-            await db.execute(
-                "UPDATE games SET chat_id=?, message_id=?, status='active' WHERE id=?",
-                (chat, msg.message_id, game_id)
-            )
+            await db.execute("UPDATE games SET chat_id=?, message_id=?, status='active' WHERE id=?", (chat, msg.message_id, game_id))
             await db.commit()
-            await update.message.reply_text("✅ Игра опубликована в чате/канале!", reply_markup=MAIN_KEYBOARD)
+            await update.message.reply_text("✅ Опубликовано!", reply_markup=MAIN_KEYBOARD)
         except Exception as e:
-            await update.message.reply_text(f"❌ Ошибка публикации: {e}", reply_markup=MAIN_KEYBOARD)
+            await update.message.reply_text(f"❌ Ошибка: {e}", reply_markup=MAIN_KEYBOARD)
 
 # ---------- Остановка ----------
 async def stop_active_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -896,26 +711,17 @@ async def stop_active_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
             (user_id,)
         )
         if not row:
-            await update.message.reply_text("❌ У вас нет активных игр.", reply_markup=MAIN_KEYBOARD)
+            await update.message.reply_text("❌ Нет активных игр.", reply_markup=MAIN_KEYBOARD)
             return
         game_id, chat_id, message_id = row[0]
         await db.execute("UPDATE games SET status='finished' WHERE id=?", (game_id,))
         await db.commit()
-
     if message_id:
         try:
-            await context.bot.edit_message_reply_markup(
-                chat_id=chat_id,
-                message_id=message_id,
-                reply_markup=None
-            )
-        except Exception:
+            await context.bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id, reply_markup=None)
+        except:
             pass
-    await update.message.reply_text(
-        f"🏁 Игра #{game_id} остановлена!\n\n"
-        "Теперь нажмите «🏆 Вручить награды», чтобы отправить призы победителям.",
-        reply_markup=MAIN_KEYBOARD
-    )
+    await update.message.reply_text(f"🏁 Игра #{game_id} остановлена!\nНажмите «🏆 Вручить награды».", reply_markup=MAIN_KEYBOARD)
 
 # ---------- Запуск ----------
 async def post_init(application: Application):
@@ -930,7 +736,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_menu))
     app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, handle_reward_photo))
     app.add_handler(CallbackQueryHandler(grid_callback))
-    logger.info("Бот Мафия Marvel запущен")
+    logger.info("Бот запущен")
     app.run_polling()
 
 if __name__ == "__main__":
