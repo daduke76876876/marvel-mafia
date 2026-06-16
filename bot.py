@@ -18,14 +18,14 @@ from telegram.constants import ParseMode
 
 # ---------- Настройки ----------
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-DB_PATH = os.path.join(os.environ.get("DATA_DIR", "./data"), "mafia_fix4.db")
+DB_PATH = os.path.join(os.environ.get("DATA_DIR", "./data"), "mafia_final.db")
 
 NIGHT_DURATION = 30
 DAY_DURATION = 60
 MIN_PLAYERS = 6
 MAX_PLAYERS = 15
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
@@ -33,7 +33,7 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
         ["🆕 Новая игра", "📤 Опубликовать"],
         ["🚀 Запустить игру", "🛑 Остановить"],
         ["🔍 Раскрыть роли", "📊 Статус"],
-        ["❓ Помощь"]
+        ["🖼 Настроить фото", "❓ Помощь"]
     ],
     resize_keyboard=True
 )
@@ -52,6 +52,10 @@ async def init_db():
                 created_by INTEGER NOT NULL,
                 max_players INTEGER DEFAULT 10,
                 phase_end REAL DEFAULT 0,
+                night_photo TEXT DEFAULT '',
+                day_photo TEXT DEFAULT '',
+                vote_photo TEXT DEFAULT '',
+                result_photo TEXT DEFAULT '',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS players (
@@ -71,28 +75,25 @@ async def init_db():
             );
             CREATE UNIQUE INDEX IF NOT EXISTS idx_player_game ON players(game_id, user_id);
         """)
-        for col in ["night_target", "has_voted"]:
+        for col in ["night_target", "has_voted", "night_photo", "day_photo", "vote_photo", "result_photo"]:
             try:
-                await db.execute(f"ALTER TABLE players ADD COLUMN {col} INTEGER DEFAULT 0")
+                if col in ["night_photo", "day_photo", "vote_photo", "result_photo"]:
+                    await db.execute(f"ALTER TABLE games ADD COLUMN {col} TEXT DEFAULT ''")
+                else:
+                    await db.execute(f"ALTER TABLE players ADD COLUMN {col} INTEGER DEFAULT 0")
             except aiosqlite.OperationalError:
                 pass
-        try:
-            await db.execute("ALTER TABLE games ADD COLUMN message_id INTEGER DEFAULT 0")
-        except aiosqlite.OperationalError:
-            pass
         await db.commit()
 
 # ---------- ГАРАНТИРОВАННЫЕ РОЛИ ----------
 def generate_roles(player_count: int) -> list:
-    roles = []
-    must_have = [
+    roles = [
         {"name": "Кингпин", "emoji": "👑", "side": "mafia", "type": "don", "desc": "Дон мафии.", "powers": "Решающий голос ночью (2 голоса)."},
         {"name": "Чёрная Вдова", "emoji": "🕷️", "side": "mafia", "type": "mistress", "desc": "Мафия.", "powers": "Голосует за жертву ночью."},
         {"name": "Ник Фьюри", "emoji": "🕵️", "side": "civilian", "type": "commissioner", "desc": "Комиссар.", "powers": "Ночью проверяет сторону игрока."},
         {"name": "Доктор Стрэндж", "emoji": "💉", "side": "civilian", "type": "doctor", "desc": "Доктор.", "powers": "Ночью лечит игрока."},
         {"name": "Клетус Кесседи", "emoji": "🩸", "side": "neutral", "type": "maniac", "desc": "Маньяк.", "powers": "Ночью убивает игрока."},
     ]
-    roles.extend(must_have)
     extra_pool = [
         {"name": "Мирный житель", "emoji": "👤", "side": "civilian", "type": "citizen", "desc": "Простой житель.", "powers": "Голосует днём."},
         {"name": "Мирный житель", "emoji": "👤", "side": "civilian", "type": "citizen", "desc": "Простой житель.", "powers": "Голосует днём."},
@@ -120,9 +121,9 @@ def build_vote_keyboard(game_id: int, players: list) -> InlineKeyboardMarkup:
     buttons = []
     for p in players:
         display = f"@{p[2]}"
-        cb = f"vote_{game_id}_{p[1]}"
+        cb = f"v_{game_id}_{p[1]}"
         buttons.append([InlineKeyboardButton(display, callback_data=cb)])
-    buttons.append([InlineKeyboardButton("⏭️ Пропустить", callback_data=f"voteskip_{game_id}")])
+    buttons.append([InlineKeyboardButton("⏭️ Пропустить", callback_data=f"vs_{game_id}")])
     return InlineKeyboardMarkup(buttons)
 
 def build_night_keyboard(game_id: int, players: list, role_type: str, for_user_id: int) -> InlineKeyboardMarkup:
@@ -131,9 +132,9 @@ def build_night_keyboard(game_id: int, players: list, role_type: str, for_user_i
         if p[0] == for_user_id:
             continue
         display = f"@{p[2]}"
-        cb = f"night_{game_id}_{role_type}_{p[0]}"
+        cb = f"n_{game_id}_{role_type}_{p[0]}"
         buttons.append([InlineKeyboardButton(display, callback_data=cb)])
-    buttons.append([InlineKeyboardButton("⏭️ Никого", callback_data=f"nightskip_{game_id}_{role_type}")])
+    buttons.append([InlineKeyboardButton("⏭️ Никого", callback_data=f"ns_{game_id}_{role_type}")])
     return InlineKeyboardMarkup(buttons)
 
 # ---------- Команда /start ----------
@@ -141,10 +142,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
     await update.message.reply_text(
-        "🤖 <b>МАФИЯ MARVEL — ПОЛНОСТЬЮ РАБОЧАЯ</b>\n\n"
-        "✅ Все ночные действия работают\n"
-        "✅ Дневное голосование с обновлением\n"
-        "✅ Публичные объявления в чате\n\n"
+        "🤖 <b>МАФИЯ MARVEL — ФИНАЛЬНАЯ</b>\n\n"
+        "✅ Все действия работают\n"
+        "✅ Ник Фьюри получает результаты\n"
+        "✅ Голосование публичное\n\n"
         "Нажмите «🆕 Новая игра».",
         reply_markup=MAIN_KEYBOARD, parse_mode=ParseMode.HTML
     )
@@ -153,8 +154,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
+
+    # Если в режиме настройки фото
+    if context.user_data.get("photo_setup") and update.message.photo:
+        await handle_photo_upload(update, context)
+        return
+
     text = update.message.text.strip()
     user_id = update.effective_user.id
+    logger.info(f"Меню: '{text}' от {user_id}")
 
     if text == "🆕 Новая игра":
         context.user_data.clear()
@@ -182,13 +190,12 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await game_status(update, context)
         return
 
+    if text == "🖼 Настроить фото":
+        await setup_photos_start(update, context)
+        return
+
     if text == "❓ Помощь":
-        await update.message.reply_text(
-            "🤖 <b>МАФИЯ — ПРАВИЛА</b>\n\n"
-            "1️⃣ Создайте игру\n2️⃣ Опубликуйте в чат\n3️⃣ Игроки присоединяются\n4️⃣ Запустите игру\n\n"
-            "🌙 Ночь: мафия, комиссар, доктор, маньяк\n☀️ День: голосование\n📢 Все действия видны в чате!",
-            parse_mode=ParseMode.HTML, reply_markup=MAIN_KEYBOARD
-        )
+        await update.message.reply_text("🤖 <b>МАФИЯ</b>\n\nСоздайте игру, опубликуйте, запустите.", parse_mode=ParseMode.HTML, reply_markup=MAIN_KEYBOARD)
         return
 
     state = context.user_data.get("state")
@@ -208,19 +215,53 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["game_id"] = game_id
             context.user_data["roles_pool"] = json.dumps(roles)
             context.user_data["state"] = "ready"
-            civilians = sum(1 for r in roles if r["side"] == "civilian")
-            mafia = sum(1 for r in roles if r["side"] == "mafia")
-            neutral = sum(1 for r in roles if r["side"] == "neutral")
-            await update.message.reply_text(
-                f"🦸 Игра #{game_id} создана!\n👥 Игроков: {num}\n🛡️ Мирные: {civilians}\n👑 Мафия: {mafia}\n⚡ Нейтралы: {neutral}\n\nНажмите «📤 Опубликовать».",
-                reply_markup=MAIN_KEYBOARD
-            )
+            await update.message.reply_text(f"🦸 Игра #{game_id} создана!\n👥 Игроков: {num}\n\nНажмите «📤 Опубликовать».", reply_markup=MAIN_KEYBOARD)
         except ValueError:
             await update.message.reply_text(f"❌ Введите число от {MIN_PLAYERS} до {MAX_PLAYERS}.")
         return
     elif state == "awaiting_chat":
         await process_chat(update, context, text)
         return
+
+# ---------- Настройка фото ----------
+async def setup_photos_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    game_id = context.user_data.get("game_id")
+    if not game_id:
+        await update.message.reply_text("❌ Сначала создайте игру.", reply_markup=MAIN_KEYBOARD)
+        return
+    context.user_data["photo_setup"] = "awaiting_night"
+    await update.message.reply_text(
+        "🖼 Этап 1/4: Отправьте фото для НОЧИ (или нажмите Пропустить)",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏭️ Пропустить", callback_data="ps_night")]])
+    )
+
+async def handle_photo_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        return
+    state = context.user_data.get("photo_setup")
+    game_id = context.user_data.get("game_id")
+    if not state or not game_id or not update.message.photo:
+        return
+
+    photo_id = update.message.photo[-1].file_id
+    async with aiosqlite.connect(DB_PATH) as db:
+        if state == "awaiting_night":
+            await db.execute("UPDATE games SET night_photo=? WHERE id=?", (photo_id, game_id))
+            context.user_data["photo_setup"] = "awaiting_day"
+            await update.message.reply_text("✅ Ночь сохранена! Этап 2/4: ДЕНЬ", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏭️ Пропустить", callback_data="ps_day")]]))
+        elif state == "awaiting_day":
+            await db.execute("UPDATE games SET day_photo=? WHERE id=?", (photo_id, game_id))
+            context.user_data["photo_setup"] = "awaiting_vote"
+            await update.message.reply_text("✅ День сохранён! Этап 3/4: ГОЛОСОВАНИЕ", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏭️ Пропустить", callback_data="ps_vote")]]))
+        elif state == "awaiting_vote":
+            await db.execute("UPDATE games SET vote_photo=? WHERE id=?", (photo_id, game_id))
+            context.user_data["photo_setup"] = "awaiting_result"
+            await update.message.reply_text("✅ Голосование сохранено! Этап 4/4: РЕЗУЛЬТАТЫ", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏭️ Пропустить", callback_data="ps_result")]]))
+        elif state == "awaiting_result":
+            await db.execute("UPDATE games SET result_photo=? WHERE id=?", (photo_id, game_id))
+            context.user_data.pop("photo_setup", None)
+            await update.message.reply_text("✅ Все фото настроены!", reply_markup=MAIN_KEYBOARD)
+        await db.commit()
 
 async def publish_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
     game_id = context.user_data.get("game_id")
@@ -243,11 +284,11 @@ async def process_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, chat:
                 chat_id=chat,
                 text=f"🤖 <b>МАФИЯ MARVEL</b>\n\n👥 Игроки (0/{game[0][0]}):\n\nНажмите кнопку, чтобы присоединиться!",
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("✅ Присоединиться", callback_data=f"join_{game_id}")
+                    InlineKeyboardButton("✅ Присоединиться", callback_data=f"j_{game_id}")
                 ]]),
                 parse_mode=ParseMode.HTML
             )
-            await db.execute("UPDATE games SET chat_id=?, message_id=? WHERE id=?", (chat, msg.message_id, game_id))
+            await db.execute("UPDATE games SET chat_id=? WHERE id=?", (chat, game_id))
             await db.commit()
             await update.message.reply_text(f"✅ Опубликовано в {chat}!", reply_markup=MAIN_KEYBOARD)
         except Exception as e:
@@ -325,20 +366,27 @@ async def game_loop(context, game_id, chat_id):
         async with aiosqlite.connect(DB_PATH) as db:
             status = await db.execute_fetchall("SELECT status FROM games WHERE id=?", (game_id,))
             if not status or status[0][0] != "active":
+                logger.info(f"Игра #{game_id} неактивна, выход из цикла")
                 break
+
+        logger.info(f"=== РАУНД {round_num}: НОЧЬ ===")
         await run_night(context, game_id, chat_id, round_num)
         if await check_win(context, game_id, chat_id):
             break
+
+        logger.info(f"=== РАУНД {round_num}: ДЕНЬ ===")
         await run_day(context, game_id, chat_id, round_num)
         if await check_win(context, game_id, chat_id):
             break
+
         round_num += 1
 
 async def run_night(context, game_id, chat_id, round_num):
     async with aiosqlite.connect(DB_PATH) as db:
-        status = await db.execute_fetchall("SELECT status FROM games WHERE id=?", (game_id,))
+        status = await db.execute_fetchall("SELECT status, night_photo FROM games WHERE id=?", (game_id,))
         if not status or status[0][0] != "active":
             return
+        night_photo = status[0][1]
         await db.execute("UPDATE games SET phase='night' WHERE id=?", (game_id,))
         await db.execute("UPDATE players SET night_target=NULL, has_voted=0 WHERE game_id=?", (game_id,))
         await db.commit()
@@ -347,7 +395,11 @@ async def run_night(context, game_id, chat_id, round_num):
             (game_id,)
         )
 
-    # Отправляем кнопки всем спецролям
+    # Отправляем кнопки
+    mafia_count = 0
+    comm_count = 0
+    doc_count = 0
+    maniac_count = 0
     for p in alive:
         role_type = p[3]
         text = None
@@ -355,44 +407,59 @@ async def run_night(context, game_id, chat_id, round_num):
         if role_type in ("don", "mistress"):
             text = f"🌙 <b>НОЧЬ #{round_num}</b>\nВы мафия. Выберите жертву:"
             kb = build_night_keyboard(game_id, [(a[0], a[1], a[2]) for a in alive], "mafia", p[1])
+            mafia_count += 1
         elif role_type == "commissioner":
             text = f"🕵️ <b>НОЧЬ #{round_num}</b>\nКого проверить?"
             kb = build_night_keyboard(game_id, [(a[0], a[1], a[2]) for a in alive], "commissioner", p[1])
+            comm_count += 1
         elif role_type == "doctor":
             text = f"💉 <b>НОЧЬ #{round_num}</b>\nКого лечить?"
             kb = build_night_keyboard(game_id, [(a[0], a[1], a[2]) for a in alive], "doctor", p[1])
+            doc_count += 1
         elif role_type == "maniac":
             text = f"🩸 <b>НОЧЬ #{round_num}</b>\nКого убить?"
             kb = build_night_keyboard(game_id, [(a[0], a[1], a[2]) for a in alive], "maniac", p[1])
+            maniac_count += 1
         
         if text and kb:
             try:
                 await context.bot.send_message(chat_id=p[1], text=text, reply_markup=kb, parse_mode=ParseMode.HTML)
-                logger.info(f"Ночные кнопки отправлены: {p[2]} ({role_type})")
+                logger.info(f"Кнопки отправлены: {p[2]} ({role_type})")
             except Exception as e:
                 logger.error(f"Ошибка отправки кнопок {p[2]}: {e}")
 
-    try:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"🌙 <b>НОЧЬ #{round_num}</b>\nМафия и спецроли выбирают цели...\nУ вас {NIGHT_DURATION} секунд.",
-            parse_mode=ParseMode.HTML
-        )
-    except:
-        pass
+    logger.info(f"Ночные кнопки: мафия={mafia_count}, комиссар={comm_count}, доктор={doc_count}, маньяк={maniac_count}")
+
+    # Объявление в чат
+    if night_photo:
+        try:
+            await context.bot.send_photo(chat_id=chat_id, photo=night_photo,
+                caption=f"🌙 <b>НОЧЬ #{round_num}</b>\nМафия и спецроли выбирают цели...\nУ вас {NIGHT_DURATION} секунд.",
+                parse_mode=ParseMode.HTML)
+        except:
+            await context.bot.send_message(chat_id=chat_id,
+                text=f"🌙 <b>НОЧЬ #{round_num}</b>\nУ вас {NIGHT_DURATION} секунд.", parse_mode=ParseMode.HTML)
+    else:
+        try:
+            await context.bot.send_message(chat_id=chat_id,
+                text=f"🌙 <b>НОЧЬ #{round_num}</b>\nМафия и спецроли выбирают цели...\nУ вас {NIGHT_DURATION} секунд.",
+                parse_mode=ParseMode.HTML)
+        except:
+            pass
 
     await asyncio.sleep(NIGHT_DURATION)
 
-    # Обработка результатов ночи
+    # Обработка результатов
     async with aiosqlite.connect(DB_PATH) as db:
         status = await db.execute_fetchall("SELECT status FROM games WHERE id=?", (game_id,))
         if not status or status[0][0] != "active":
             return
 
         players = await db.execute_fetchall(
-            "SELECT user_id, username, role_type, night_target FROM players WHERE game_id=? AND is_alive=1",
+            "SELECT user_id, username, role_type, night_target FROM players WHERE game_id=? AND is_alive=1 AND night_target IS NOT NULL",
             (game_id,)
         )
+        logger.info(f"Ночные цели: {[(p[1], p[2], p[3]) for p in players]}")
 
         mafia_votes = {}
         doctor_target = None
@@ -400,40 +467,40 @@ async def run_night(context, game_id, chat_id, round_num):
         commissioner_checks = {}
 
         for p in players:
-            if p[3]:  # night_target
-                target_id = p[3]
-                if p[2] in ("don", "mistress"):
-                    votes = 2 if p[2] == "don" else 1
-                    mafia_votes[target_id] = mafia_votes.get(target_id, 0) + votes
-                elif p[2] == "doctor":
-                    doctor_target = target_id
-                elif p[2] == "maniac":
-                    maniac_target = target_id
-                elif p[2] == "commissioner":
-                    target = await db.execute_fetchall(
-                        "SELECT role_side, username FROM players WHERE game_id=? AND user_id=?",
-                        (game_id, target_id)
-                    )
-                    if target:
-                        commissioner_checks[p[0]] = (target_id, target[0][0], target[0][1])
+            target_id = p[3]
+            if target_id == 0:
+                continue
+            if p[2] in ("don", "mistress"):
+                votes = 2 if p[2] == "don" else 1
+                mafia_votes[target_id] = mafia_votes.get(target_id, 0) + votes
+                logger.info(f"Мафия {p[1]} голосует за {target_id}")
+            elif p[2] == "doctor":
+                doctor_target = target_id
+                logger.info(f"Доктор лечит {target_id}")
+            elif p[2] == "maniac":
+                maniac_target = target_id
+                logger.info(f"Маньяк убивает {target_id}")
+            elif p[2] == "commissioner":
+                target = await db.execute_fetchall(
+                    "SELECT role_side, username FROM players WHERE game_id=? AND user_id=?",
+                    (game_id, target_id)
+                )
+                if target:
+                    commissioner_checks[p[0]] = (target_id, target[0][0], target[0][1])
+                    logger.info(f"Комиссар {p[1]} проверяет {target[0][1]} ({target[0][0]})")
 
-        # Публичные объявления
-        announcements = []
-        if mafia_votes:
-            announcements.append("👑 <b>Мафия</b> выбрала цель...")
-        if doctor_target:
-            announcements.append("💉 <b>Доктор</b> посетил одного из жителей...")
-        if commissioner_checks:
-            announcements.append("🕵️ <b>Комиссар</b> провёл расследование...")
-        if maniac_target:
-            announcements.append("🩸 <b>Маньяк</b> вышел на охоту...")
-
-        for ann in announcements:
+        # Отправляем результаты комиссару
+        for comm_id, (target_id, side, target_name) in commissioner_checks.items():
+            side_text = {"civilian": "🛡️ Мирный", "mafia": "👑 Мафия", "neutral": "⚡ Нейтрал"}.get(side, "Неизвестно")
             try:
-                await context.bot.send_message(chat_id=chat_id, text=ann, parse_mode=ParseMode.HTML)
-                await asyncio.sleep(1)
-            except:
-                pass
+                await context.bot.send_message(
+                    chat_id=comm_id,
+                    text=f"🕵️ <b>Результат проверки:</b>\n@{target_name} — {side_text}",
+                    parse_mode=ParseMode.HTML
+                )
+                logger.info(f"Результат комиссару {comm_id}: {target_name} = {side_text}")
+            except Exception as e:
+                logger.error(f"Ошибка отправки комиссару: {e}")
 
         # Определяем жертву мафии
         mafia_victim = None
@@ -441,6 +508,7 @@ async def run_night(context, game_id, chat_id, round_num):
             max_votes = max(mafia_votes.values())
             candidates = [tid for tid, v in mafia_votes.items() if v == max_votes]
             mafia_victim = random.choice(candidates)
+            logger.info(f"Жертва мафии: {mafia_victim}")
 
         # Применяем убийства
         killed = set()
@@ -459,7 +527,33 @@ async def run_night(context, game_id, chat_id, round_num):
             if p:
                 killed_names.append(f"@{p[0][0]}")
 
-    # Результаты в чат
+    # Объявления в чат
+    if mafia_votes:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text="👑 <b>Мафия</b> выбрала цель...", parse_mode=ParseMode.HTML)
+            await asyncio.sleep(0.5)
+        except:
+            pass
+    if doctor_target:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text="💉 <b>Доктор</b> посетил одного из жителей...", parse_mode=ParseMode.HTML)
+            await asyncio.sleep(0.5)
+        except:
+            pass
+    if commissioner_checks:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text="🕵️ <b>Комиссар</b> провёл расследование...", parse_mode=ParseMode.HTML)
+            await asyncio.sleep(0.5)
+        except:
+            pass
+    if maniac_target:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text="🩸 <b>Маньяк</b> вышел на охоту...", parse_mode=ParseMode.HTML)
+            await asyncio.sleep(0.5)
+        except:
+            pass
+
+    # Утро
     result = f"🌅 <b>УТРО (раунд {round_num})</b>\n"
     result += f"💀 Убиты: {', '.join(killed_names)}\n" if killed_names else "✨ Никто не пострадал.\n"
     try:
@@ -467,23 +561,14 @@ async def run_night(context, game_id, chat_id, round_num):
     except:
         pass
 
-    # Результаты комиссару
-    for comm_id, (target_id, side, target_name) in commissioner_checks.items():
-        side_text = {"civilian": "🛡️ Мирный", "mafia": "👑 Мафия", "neutral": "⚡ Нейтрал"}.get(side, "Неизвестно")
-        try:
-            await context.bot.send_message(
-                chat_id=comm_id,
-                text=f"🕵️ <b>Результат проверки:</b>\n@{target_name} — {side_text}",
-                parse_mode=ParseMode.HTML
-            )
-        except:
-            pass
-
 async def run_day(context, game_id, chat_id, round_num):
     async with aiosqlite.connect(DB_PATH) as db:
-        status = await db.execute_fetchall("SELECT status FROM games WHERE id=?", (game_id,))
+        status = await db.execute_fetchall("SELECT status, day_photo, vote_photo, result_photo FROM games WHERE id=?", (game_id,))
         if not status or status[0][0] != "active":
             return
+        day_photo = status[0][1]
+        vote_photo = status[0][2]
+        result_photo = status[0][3]
         await db.execute("UPDATE games SET phase='day' WHERE id=?", (game_id,))
         await db.execute("UPDATE players SET has_voted=0, vote_target=NULL WHERE game_id=?", (game_id,))
         await db.commit()
@@ -526,7 +611,6 @@ async def run_day(context, game_id, chat_id, round_num):
         if target not in vote_details:
             vote_details[target] = []
         vote_details[target].append(v[0])
-        # Находим user_id цели
         async with aiosqlite.connect(DB_PATH) as db:
             target_row = await db.execute_fetchall("SELECT user_id FROM players WHERE game_id=? AND username=?", (game_id, target))
             if target_row:
@@ -540,12 +624,18 @@ async def run_day(context, game_id, chat_id, round_num):
     else:
         vote_announcement += "😴 Никто не проголосовал.\n"
 
-    try:
-        await context.bot.send_message(chat_id=chat_id, text=vote_announcement, parse_mode=ParseMode.HTML)
-    except:
-        pass
+    if vote_photo:
+        try:
+            await context.bot.send_photo(chat_id=chat_id, photo=vote_photo, caption=vote_announcement, parse_mode=ParseMode.HTML)
+        except:
+            await context.bot.send_message(chat_id=chat_id, text=vote_announcement, parse_mode=ParseMode.HTML)
+    else:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=vote_announcement, parse_mode=ParseMode.HTML)
+        except:
+            pass
 
-    # Определяем результат
+    # Итог
     if vote_count:
         max_votes = max(vote_count.values())
         candidates = [tid for tid, v in vote_count.items() if v == max_votes]
@@ -564,10 +654,16 @@ async def run_day(context, game_id, chat_id, round_num):
     else:
         result = "☀️ <b>ИТОГ</b>\n\n😴 Никто не проголосовал."
 
-    try:
-        await context.bot.send_message(chat_id=chat_id, text=result, parse_mode=ParseMode.HTML)
-    except:
-        pass
+    if result_photo:
+        try:
+            await context.bot.send_photo(chat_id=chat_id, photo=result_photo, caption=result, parse_mode=ParseMode.HTML)
+        except:
+            await context.bot.send_message(chat_id=chat_id, text=result, parse_mode=ParseMode.HTML)
+    else:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=result, parse_mode=ParseMode.HTML)
+        except:
+            pass
 
     if vote_message:
         try:
@@ -580,6 +676,7 @@ async def check_win(context, game_id, chat_id) -> bool:
         alive = await db.execute_fetchall("SELECT role_side FROM players WHERE game_id=? AND is_alive=1", (game_id,))
         civilians = sum(1 for a in alive if a[0] == "civilian")
         mafia = sum(1 for a in alive if a[0] == "mafia")
+        logger.info(f"Проверка победы: мирные={civilians}, мафия={mafia}")
         if mafia >= civilians and mafia > 0:
             await db.execute("UPDATE games SET status='finished' WHERE id=?", (game_id,))
             await db.commit()
@@ -606,11 +703,31 @@ async def grid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
     username = user.username or user.first_name
 
-    logger.info(f"CALLBACK: {data} от {username} ({user_id})")
+    logger.info(f"CALLBACK: data='{data}', user={username} ({user_id})")
 
-    # Присоединение
-    if data.startswith("join_"):
+    # Пропуск фото
+    if data.startswith("ps_"):
+        game_id = context.user_data.get("game_id")
+        phase = data.split("_")[1]
+        if phase == "night":
+            context.user_data["photo_setup"] = "awaiting_day"
+            await query.edit_message_text("Этап 2/4: Отправьте фото для ДНЯ", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏭️ Пропустить", callback_data="ps_day")]]))
+        elif phase == "day":
+            context.user_data["photo_setup"] = "awaiting_vote"
+            await query.edit_message_text("Этап 3/4: Отправьте фото для ГОЛОСОВАНИЯ", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏭️ Пропустить", callback_data="ps_vote")]]))
+        elif phase == "vote":
+            context.user_data["photo_setup"] = "awaiting_result"
+            await query.edit_message_text("Этап 4/4: Отправьте фото для РЕЗУЛЬТАТОВ", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏭️ Пропустить", callback_data="ps_result")]]))
+        elif phase == "result":
+            context.user_data.pop("photo_setup", None)
+            await query.edit_message_text("✅ Настройка фото завершена!")
+        await query.answer()
+        return
+
+    # Присоединение: j_123
+    if data.startswith("j_"):
         game_id = int(data.split("_")[1])
+        logger.info(f"Присоединение к игре {game_id}")
         async with aiosqlite.connect(DB_PATH) as db:
             game = await db.execute_fetchall("SELECT status, max_players FROM games WHERE id=?", (game_id,))
             if not game or game[0][0] != "lobby":
@@ -633,7 +750,7 @@ async def grid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text(
                     f"🤖 <b>МАФИЯ MARVEL</b>\n\n👥 Игроки ({current}/{game[0][1]}):\n{player_list}\n\nНажмите кнопку, чтобы присоединиться!",
                     reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("✅ Присоединиться", callback_data=f"join_{game_id}")
+                        InlineKeyboardButton("✅ Присоединиться", callback_data=f"j_{game_id}")
                     ]]) if current < game[0][1] else None,
                     parse_mode=ParseMode.HTML
                 )
@@ -642,33 +759,30 @@ async def grid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer(f"✅ Вы в игре! ({current}/{game[0][1]})", show_alert=True)
         return
 
-    # Дневное голосование
-    if data.startswith("vote_") and "voteskip" not in data:
+    # Дневное голосование: v_123_456
+    if data.startswith("v_") and not data.startswith("vs_"):
         parts = data.split("_")
+        if len(parts) != 3:
+            await query.answer("❌ Ошибка данных.", show_alert=True)
+            return
         game_id = int(parts[1])
         target_id = int(parts[2])
+        logger.info(f"Голосование: {username} -> {target_id}")
 
         async with aiosqlite.connect(DB_PATH) as db:
             game = await db.execute_fetchall("SELECT phase, message_id, chat_id FROM games WHERE id=?", (game_id,))
             if not game or game[0][0] != "day":
                 await query.answer("❌ Сейчас не день.", show_alert=True)
                 return
-
             voter = await db.execute_fetchall("SELECT is_alive, role_type, has_voted FROM players WHERE game_id=? AND user_id=?", (game_id, user_id))
             if not voter or not voter[0][0]:
                 await query.answer("❌ Вы мертвы.", show_alert=True)
                 return
-
-            # ПРОВЕРКА: уже голосовал?
             if voter[0][2]:
                 await query.answer("❌ Вы уже голосовали!", show_alert=True)
                 return
 
-            # Сохраняем голос
-            await db.execute(
-                "UPDATE players SET has_voted=1, vote_target=? WHERE game_id=? AND user_id=?",
-                (target_id, game_id, user_id)
-            )
+            await db.execute("UPDATE players SET has_voted=1, vote_target=? WHERE game_id=? AND user_id=?", (target_id, game_id, user_id))
             if voter[0][1] == "sergeant":
                 await db.execute(
                     "INSERT INTO players (game_id, user_id, username, role_name, role_emoji, role_side, role_type, is_alive, has_voted, vote_target) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 1, ?)",
@@ -676,7 +790,6 @@ async def grid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             await db.commit()
 
-            # Обновляем сообщение с голосами
             votes = await db.execute_fetchall(
                 "SELECT p.username, t.username FROM players p LEFT JOIN players t ON p.vote_target = t.user_id AND p.game_id = t.game_id WHERE p.game_id=? AND p.is_alive=1 AND p.vote_target IS NOT NULL",
                 (game_id,)
@@ -700,9 +813,7 @@ async def grid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if message_id:
                 try:
                     await context.bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=message_id,
-                        text=vote_text,
+                        chat_id=chat_id, message_id=message_id, text=vote_text,
                         reply_markup=build_vote_keyboard(game_id, [(p[0], p[1], p[2], p[3]) for p in await db.execute_fetchall(
                             "SELECT id, user_id, username, role_emoji FROM players WHERE game_id=? AND is_alive=1", (game_id,)
                         )]),
@@ -714,31 +825,35 @@ async def grid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("✅ Голос учтён!", show_alert=True)
         return
 
-    if data.startswith("voteskip_"):
+    # Пропуск голосования: vs_123
+    if data.startswith("vs_"):
+        game_id = int(data.split("_")[1])
         async with aiosqlite.connect(DB_PATH) as db:
-            voter = await db.execute_fetchall("SELECT has_voted FROM players WHERE game_id=? AND user_id=?", (int(data.split("_")[1]), user_id))
+            voter = await db.execute_fetchall("SELECT has_voted FROM players WHERE game_id=? AND user_id=?", (game_id, user_id))
             if voter and voter[0][0]:
                 await query.answer("❌ Вы уже голосовали!", show_alert=True)
                 return
-            await db.execute("UPDATE players SET has_voted=1 WHERE game_id=? AND user_id=?", (int(data.split("_")[1]), user_id))
+            await db.execute("UPDATE players SET has_voted=1 WHERE game_id=? AND user_id=?", (game_id, user_id))
             await db.commit()
         await query.answer("Вы пропустили голосование.", show_alert=True)
         return
 
-    # Ночные действия
-    if data.startswith("night_") and "nightskip" not in data:
+    # Ночные действия: n_123_mafia_456
+    if data.startswith("n_") and not data.startswith("ns_"):
         parts = data.split("_")
+        if len(parts) != 4:
+            await query.answer("❌ Ошибка данных.", show_alert=True)
+            return
         game_id = int(parts[1])
         role_type = parts[2]
         target_id = int(parts[3])
+        logger.info(f"Ночное действие: {username} ({role_type}) -> {target_id}")
 
         async with aiosqlite.connect(DB_PATH) as db:
             game = await db.execute_fetchall("SELECT phase FROM games WHERE id=?", (game_id,))
             if not game or game[0][0] != "night":
                 await query.answer("❌ Сейчас не ночь.", show_alert=True)
                 return
-
-            # Проверяем роль игрока
             player = await db.execute_fetchall("SELECT role_type, is_alive FROM players WHERE game_id=? AND user_id=?", (game_id, user_id))
             if not player:
                 await query.answer("❌ Вы не в игре.", show_alert=True)
@@ -748,34 +863,31 @@ async def grid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             actual_role = player[0][0]
-            logger.info(f"Ночное действие: {username}, actual_role={actual_role}, requested_role={role_type}")
+            logger.info(f"Фактическая роль: {actual_role}, запрошенная: {role_type}")
 
-            # Проверяем соответствие роли
-            if role_type == "mafia" and actual_role not in ("don", "mistress"):
-                await query.answer("❌ Вы не мафия!", show_alert=True)
-                return
-            if role_type == "commissioner" and actual_role != "commissioner":
-                await query.answer("❌ Вы не комиссар!", show_alert=True)
-                return
-            if role_type == "doctor" and actual_role != "doctor":
-                await query.answer("❌ Вы не доктор!", show_alert=True)
-                return
-            if role_type == "maniac" and actual_role != "maniac":
-                await query.answer("❌ Вы не маньяк!", show_alert=True)
+            # Проверка роли
+            valid = False
+            if role_type == "mafia" and actual_role in ("don", "mistress"):
+                valid = True
+            elif role_type == "commissioner" and actual_role == "commissioner":
+                valid = True
+            elif role_type == "doctor" and actual_role == "doctor":
+                valid = True
+            elif role_type == "maniac" and actual_role == "maniac":
+                valid = True
+
+            if not valid:
+                await query.answer(f"❌ Вы не {role_type}! Ваша роль: {actual_role}", show_alert=True)
                 return
 
-            # Сохраняем цель
-            await db.execute(
-                "UPDATE players SET night_target=? WHERE game_id=? AND user_id=?",
-                (target_id, game_id, user_id)
-            )
+            await db.execute("UPDATE players SET night_target=? WHERE game_id=? AND user_id=?", (target_id, game_id, user_id))
             await db.commit()
 
         await query.answer("✅ Действие выполнено!", show_alert=True)
-        logger.info(f"Ночное действие сохранено: {username} ({role_type}) -> {target_id}")
         return
 
-    if data.startswith("nightskip_"):
+    # Пропуск ночного действия: ns_123_mafia
+    if data.startswith("ns_"):
         parts = data.split("_")
         game_id = int(parts[1])
         role_type = parts[2]
@@ -849,6 +961,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_menu))
+    app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, handle_photo_upload))
     app.add_handler(CallbackQueryHandler(grid_callback))
     logger.info("Бот запущен")
     app.run_polling()
